@@ -1,0 +1,824 @@
+---
+title: "Big Data Bowl"
+author: "Dylan Bose"
+date: "12/28/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+#This is the setup
+#getwd()
+#setwd("/Users/dylanbose/Desktop/BigDataBowl/Data/nfl-big-data-bowl-2021")
+
+#Loading pre-installed libraries
+library(tidyverse)
+library(gganimate)
+library(cowplot)
+library(repr)
+library(tm)
+library(ggrepel)
+library(glmnet)
+
+#turning off warnings
+options(warn=-1)
+
+#setting plot width and height
+options(repr.plot.width=15, repr.plot.height = 10)
+```
+
+```{r}
+#####################################
+### RUN THESE IN THE COMMAND LINE ###
+#####################################
+
+##reading in non-tracking data
+
+#includes schedule info for games
+df_games <- read_csv("../nfl-big-data-bowl-2021/games.csv",
+                    col_types = cols())
+
+#includes play-by-play info on specific plays
+df_plays <- read_csv("../nfl-big-data-bowl-2021/plays.csv",
+                    col_types = cols())
+
+#includes background info for players
+df_players <- read_csv("../nfl-big-data-bowl-2021/players.csv",
+                    col_types = cols())
+
+##Reading tracking data (needs to be done iteratively)
+
+#weeks of NFL season
+weeks <- seq(1, 17)
+
+#blank dataframe to store tracking data
+df_tracking <- data.frame()
+
+#iterating through all weeks
+for(w in weeks){
+    
+    #temperory dataframe used for reading week for given iteration
+    df_tracking_temp <- read_csv(paste0("../nfl-big-data-bowl-2021/week",w,".csv"),
+                                col_types = cols())
+    
+    #storing temporary dataframe in full season dataframe
+    df_tracking <- bind_rows(df_tracking_temp, df_tracking)                            
+    
+}
+
+#Cleaning the Data
+#Standardizing tracking data so its always in direction of offense vs raw on-field coordinates.
+df_tracking <- df_tracking %>%
+                mutate(x = ifelse(playDirection == "left", 120-x, x),
+                       y = ifelse(playDirection == "left", 160/3 - y, y))
+
+#includes targeted receiver by play
+df_targetedReceiver <- read_csv("../nfl-big-data-bowl-2021/targetedReceiver.csv",
+                      col_types = cols())
+
+#includes coverage schemes for each play in week 1. Note: less accurate the closer to the goal line
+df_coveragesW1 <- read_csv("../nfl-big-data-bowl-2021/coverages_week1.csv",
+                      col_types = cols())
+```
+
+```{r}
+#Calculating Basic Defensive Player Metrics
+
+#merging data
+#merging plays and tracking data
+df_merged <- inner_join(df_games,
+                        df_plays,
+                        by = c("gameId" = "gameId"))
+
+#merging games data to previously merged frame
+df_merged <- inner_join(df_merged,
+                        df_tracking,
+                        by = c("gameId" = "gameId",
+                               "playId" = "playId"))
+```
+
+```{r}
+#Stat 1: Defender Distance at Ball Arrival
+
+#What this code does:
+# 1: Determine which players are on defense and are on offense.
+# 2:Filters to only include New England Patriots players on Defense.
+# 3:Save the position of the football for every frame of every play.
+# 4:Filter for the frame of each play when the pass arrival occurs.
+# 5:Calculate the distance from each player to the football.
+
+
+#defining events that designate pass arrival
+passArivalEvents <- c('pass_outcome_caught',
+                      'pass_arrived',
+                      'pass_outcome_incomplete',
+                      'pass_outcome_interception',
+                      'pass_outcome_touchdown')
+
+
+df_distanceToFootball <- df_merged %>%
+
+#determining side of ball
+mutate(sideOfBall = ifelse(#if tracked player is home and home has ball
+                          ((team == "home") &
+                          (possessionTeam == homeTeamAbbr)) |
+                          
+                          #if tracked player is away and away has ball
+                          ((team == "away") &
+                          (possessionTeam == visitorTeamAbbr)),
+    
+    
+                          #if either condition is true, offense
+                          "offense",
+    
+                          #if neither condition is true, defense
+                          "defense"),
+      
+      #defining defensive team
+      defensiveTeam = ifelse(possessionTeam == homeTeamAbbr,
+                            visitorTeamAbbr,
+                            homeTeamAbbr)) %>%
+                          
+
+#using NE on defense only
+filter(defensiveTeam == "NE", sideOfBall == "defense") %>%
+#filter(sideOfBall == "defense") %>%
+    
+#grouping by game, play and frame
+group_by(gameId, playId, frameId) %>%
+
+#checking if football reading is in frame
+mutate(footballInPlay = sum(displayName == "Football") > 0) %>%
+
+#using only frames with football marked; some plays its missing
+filter(footballInPlay) %>%
+
+#adding x and y location of football as columns
+mutate(xFootball = x[displayName == "Football"],
+       yFootball = y[displayName == "Football"]) %>%
+
+#ungrouping
+ungroup() %>%
+
+#grouping by game and play
+group_by(gameId, playId) %>%
+
+#selecting frames that contain pass arrival events
+filter(event %in% passArivalEvents) %>%
+
+#selecting first frame with in case there are multiple
+filter(frameId == min(frameId)) %>%
+
+#calculating distance to football
+mutate(
+    
+    distToFootballAtBallArrival = sqrt((x - xFootball) ^ 2 +
+                      (y - yFootball) ^ 2)
+    
+)
+
+```
+
+```{r}
+#Stat 2: Average Distance to Football by Defender at Ball Arrival
+
+#calculating the average distance to the football
+averageDistToFootball <- df_distanceToFootball %>%   
+        
+    #selecting players with valid nfl ID (excluding football)
+    filter(!is.na(nflId)) %>%
+
+    #grouping by player's id
+    group_by(nflId) %>%
+
+    #taking mean of distance to football
+    summarize(avgDistToFootballAtBallArrival = mean(distToFootballAtBallArrival)) %>%
+
+    #joining to players data
+    inner_join(df_players,
+              by = c("nflId" = "nflId"))
+
+
+#displaying a few random results
+set.seed(1)
+
+averageDistToFootball  %>%
+    #plotting results
+    ggplot(aes(reorder(displayName, 
+                       -avgDistToFootballAtBallArrival),
+               avgDistToFootballAtBallArrival)) +
+
+    #using bar chart
+    geom_bar(stat = 'identity', color = 'blue', fill = 'lightblue') +
+
+    #applying theme
+    theme_bw() +
+    theme(text = element_text(size=22)) +
+
+    #labeling axis
+    xlab('') +
+
+    ylab("Avg Distance to Football at Pass Arrival") + 
+
+    #flipping coordinates
+    coord_flip() +
+
+    #titling plot
+    ggtitle("Avg Distance to Football at Pass Arrival by Player")
+
+```
+
+```{r}
+#Stat 3: Number of Plays as Closest Defender
+
+numberOfPlaysClosestDefender <- df_distanceToFootball %>%   
+        
+    #selecting players with valid nfl ID (excluding football)
+    filter(!is.na(nflId)) %>%
+
+    #grouping by NFL Id
+    group_by(gameId, playId) %>%
+
+    #filtering for closest defender to ball
+    filter(distToFootballAtBallArrival == min(distToFootballAtBallArrival)) %>%
+
+    #ungrouping
+    group_by(nflId) %>%
+
+    summarize(numberOfPlaysAsClosestDefender = n()) %>%
+
+    #joining to players data
+    inner_join(df_players,
+              by = c("nflId" = "nflId"))
+
+#displaying a few random results
+set.seed(1)
+
+numberOfPlaysClosestDefender  %>%
+    #plotting results
+    ggplot(aes(reorder(displayName, 
+                       numberOfPlaysAsClosestDefender),
+               numberOfPlaysAsClosestDefender)) +
+
+    #using bar chart
+    geom_bar(stat = 'identity', color = 'blue', fill = 'lightblue') +
+
+    #applying theme
+    theme_bw() +
+    theme(text = element_text(size=22)) +
+
+    #labeling axis
+    xlab('') +
+
+    ylab("# of Plays As closest Defender to Football at Pass Arrival") + 
+
+    #flipping coordinates
+    coord_flip() +
+
+    #titling plot
+    ggtitle("# of Plays As closest Defender to Ball at Pass Arrival By Player")
+```
+
+```{r}
+#Stat 4: Number of Plays as Closest Defender Per Play
+
+numberOfPlaysClosestDefenderPerPlay <- df_distanceToFootball %>%   
+        
+    #selecting players with valid nfl ID (excluding football)
+    filter(!is.na(nflId)) %>%
+
+    #grouping by NFL Id
+    group_by(gameId, playId) %>%
+
+    #filtering for closest defender to ball
+    mutate(isClosestDefender = distToFootballAtBallArrival == min(distToFootballAtBallArrival)) %>%
+    
+    #ungrouping
+    ungroup() %>%
+
+    #grouping by defender's id
+    group_by(nflId) %>%
+
+    #calculatign value of interest
+    summarize(numberOfPlaysAsClosestDefenderPerPlay = sum(isClosestDefender) / n()) %>%
+
+    #joining to players data
+    inner_join(df_players,
+              by = c("nflId" = "nflId"))
+
+#displaying a few random results
+set.seed(1)
+
+numberOfPlaysClosestDefenderPerPlay  %>%
+    #plotting results
+    ggplot(aes(reorder(displayName, 
+                       numberOfPlaysAsClosestDefenderPerPlay), 
+               numberOfPlaysAsClosestDefenderPerPlay)) +
+
+    #using bar chart
+    geom_bar(stat = 'identity', color = 'blue', fill = 'lightblue') +
+
+    #applying theme
+    theme_bw() +
+    theme(text = element_text(size=22)) +
+
+    #labeling axis
+    xlab('') +
+
+    ylab("# of Plays As Closest Defender to Football at Pass Arrival  Per Play") + 
+
+    #flipping coordinates
+    coord_flip() +
+
+    #titling plot
+    ggtitle("# of Plays As Closest Defender to Ball at Pass Arrival Per Play By Player")
+```
+
+```{r}
+#Stat 5: Completion Percentage Allowed as Closest Defender
+#NOTE: only does this for NE. Go to line 308 to change the team. Look into how to not filter. Not filtering exceeds the storage space for R. So, going to basically do the process for all 32 teams, create new dataframe with just NE, and then add the comp% tables to it.
+
+completionPercentageAsClosest <- df_distanceToFootball %>%   
+        
+    #selecting players with valid nfl ID (excluding football)
+    filter(!is.na(nflId),
+           
+    #removing defensive PI
+    !isDefensivePI) %>%
+
+    #grouping by NFL Id
+    group_by(gameId, playId) %>%
+
+    #filtering for closest defender to ball
+    filter(distToFootballAtBallArrival == 
+           min(distToFootballAtBallArrival)) %>%
+
+    #ungrouping
+    group_by(nflId) %>%
+
+    
+    summarize(compPercent = sum(passResult == "C") / n()) %>%
+
+    #joining to players data
+    inner_join(df_players,
+              by = c("nflId" = "nflId"))
+
+#displaying a few random results
+set.seed(1)
+
+completionPercentageAsClosest  %>%
+
+    #plotting results
+    ggplot(aes(reorder(displayName, 
+                       -compPercent), 
+               compPercent)) +
+
+    #using bar chart
+    geom_bar(stat = 'identity', color = 'blue', fill = 'lightblue') +
+
+    #applying theme
+    theme_bw() +
+    theme(text = element_text(size=22)) +
+
+    #labeling axis
+    xlab('') +
+
+    ylab("Allowed Comp % As Closest Defender to Football at Pass Arrival") + 
+
+    #changing to percentage scale
+    scale_y_continuous(labels = scales::percent) +
+
+    #flipping coordinates
+    coord_flip() +
+
+
+
+    #titling plot
+    ggtitle("Allowed Comp % As Closest Defender to Ball at Pass Arrival By Player")
+```
+
+```{r}
+#Stat 5: Part 2
+
+#create array of all team names
+teams = unique(df_plays$possessionTeam)
+
+final_completionPercentageAsClosest = completionPercentageAsClosest[0,]
+
+test = rbind(final_completionPercentageAsClosest,completionPercentageAsClosest)
+
+#########################
+i = 1
+for(t in teams){
+
+  print(paste0('This is run: ',i))
+
+  #Step 1: defining the big table for the given team
+  temp_df_disttofootball <- df_merged %>%
+
+  #determining side of ball
+  mutate(sideOfBall = ifelse(#if tracked player is home and home has ball
+                            ((team == "home") &
+                            (possessionTeam == homeTeamAbbr)) |
+
+                            #if tracked player is away and away has ball
+                            ((team == "away") &
+                            (possessionTeam == visitorTeamAbbr)),
+
+
+                            #if either condition is true, offense
+                            "offense",
+
+                            #if neither condition is true, defense
+                            "defense"),
+
+        #defining defensive team
+        defensiveTeam = ifelse(possessionTeam == homeTeamAbbr,
+                              visitorTeamAbbr,
+                              homeTeamAbbr)) %>%
+
+
+  #using NE on defense only
+  filter(defensiveTeam == t, sideOfBall == "defense") %>%
+
+  #grouping by game, play and frame
+  group_by(gameId, playId, frameId) %>%
+
+  #checking if football reading is in frame
+  mutate(footballInPlay = sum(displayName == "Football") > 0) %>%
+
+  #using only frames with football marked; some plays its missing
+  filter(footballInPlay) %>%
+
+  #adding x and y location of football as columns
+  mutate(xFootball = x[displayName == "Football"],
+         yFootball = y[displayName == "Football"]) %>%
+
+  #ungrouping
+  ungroup() %>%
+
+  #grouping by game and play
+  group_by(gameId, playId) %>%
+
+  #selecting frames that contain pass arrival events
+  filter(event %in% passArivalEvents) %>%
+
+  #selecting first frame with in case there are multiple
+  filter(frameId == min(frameId)) %>%
+
+  #calculating distance to football
+  mutate(
+
+      distToFootballAtBallArrival = sqrt((x - xFootball) ^ 2 +
+                        (y - yFootball) ^ 2)
+
+  )
+
+  #Step 2: Finding number of plays as closest defender
+  temp_numberOfPlaysClosestDefender <- temp_df_disttofootball %>%
+
+    #selecting players with valid nfl ID (excluding football)
+    filter(!is.na(nflId)) %>%
+
+    #grouping by NFL Id
+    group_by(gameId, playId) %>%
+
+    #filtering for closest defender to ball
+    filter(distToFootballAtBallArrival == min(distToFootballAtBallArrival)) %>%
+
+    #ungrouping
+    group_by(nflId) %>%
+
+    summarize(temp_numberOfPlaysAsClosestDefender = n()) %>%
+
+    #joining to players data
+    inner_join(df_players,
+              by = c("nflId" = "nflId"))
+
+  #Step 3: Calculating the completion % when closest defender
+  temp_completionPercentageAsClosest <- temp_df_disttofootball %>%
+
+    #selecting players with valid nfl ID (excluding football)
+    filter(!is.na(nflId),
+
+    #removing defensive PI
+    !isDefensivePI) %>%
+
+    #grouping by NFL Id
+    group_by(gameId, playId) %>%
+
+    #filtering for closest defender to ball
+    filter(distToFootballAtBallArrival ==
+           min(distToFootballAtBallArrival)) %>%
+
+    #ungrouping
+    group_by(nflId) %>%
+
+
+    summarize(compPercent = sum(passResult == "C") / n()) %>%
+
+    #joining to players data
+    inner_join(df_players,
+              by = c("nflId" = "nflId"))
+  
+  new_df = temp_numberOfPlaysClosestDefender %>% inner_join(temp_completionPercentageAsClosest)
+
+  final_completionPercentageAsClosest = rbind(final_completionPercentageAsClosest, new_df)
+  i = i + 1
+}
+
+remove(temp_completionPercentageAsClosest, temp_df_disttofootball, temp_numberOfPlaysClosestDefender)
+final_completionPercentageAsClosest = final_completionPercentageAsClosest %>% 
+  distinct(nflId, .keep_all = TRUE) %>%
+    rename(
+      closestDefenderPlays = temp_numberOfPlaysAsClosestDefender
+    )
+```
+```{r}
+playsFilter = filter(final_completionPercentageAsClosest, closestDefenderPlays >= 48)
+playsFilter
+```
+
+```{r}
+#NOTE: IF THIS GIVES YOU AN ERROR, JUST RUN THE READ_CSV IN THE COMMAND LINE
+df_clay = read_csv("../nfl-big-data-bowl-2021/playerData.csv",
+                    col_types = cols())
+clay = df_clay
+
+#Get players in top 10% for "best" coverage
+bestCoverage = playsFilter %>% slice_min(playsFilter$compPercent, prop = 0.10)
+
+#kNN model
+bins = read.csv("playsDataWithBinsNum.csv", header = TRUE) #need to get rid of non-numeric columns
+bins <- as.data.frame(bins)
+
+ 
+
+binsTrimmed <- bins[, c("avg_speed", "avg_accel", "BigTen", "ACC", "Linebackers","performanceBin")]
+
+ 
+
+check_accuracy = function(X){
+  predicted <- rep(0,(nrow(binsTrimmed))) # predictions: start with a vector of all zeros
+  # for each row, estimate its response based on the other rows
+  
+  for (i in 1:nrow(binsTrimmed)){
+    
+    # data[-i] means we remove row i of the data when finding nearest neighbors...
+    #...otherwise, it'll be its own nearest neighbor!
+    
+    model=kknn(performanceBin~.,binsTrimmed[-i,],binsTrimmed[i,],k=X, scale = TRUE) # use scaled data
+    
+    # record whether the prediction is at least 0.5 (round to one) or less than 0.5 (round to zero)
+    predicted[i] <- as.integer(fitted(model)) # round off to 0 or 1
+  }
+
+ 
+
+  # calculate fraction of correct predictions
+  acc = sum(predicted == binsTrimmed[,dim(binsTrimmed)[2]]) / nrow(binsTrimmed)
+  return(acc)
+}
+
+ 
+
+#
+# Now call the function for values of k from 1 to 20 (you could try higher values of k too)
+#
+
+ 
+
+accurracy=rep(0,20) # set up a vector of 20 zeros to start
+for (X in 1:20){
+  accurracy[X] = check_accuracy(X)
+}
+#
+# report accuracies
+#
+
+ 
+
+plot(accurracy)
+title("K-Nearest-Neighbors")
+accurracy
+
+
+write.csv(clay_copy, "playsDataWithBins.csv")
+
+#Getting all of the quartiles for the completion percentage against
+summary(clay[,2])
+
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+#  0.3818  0.5720  0.6375  0.6369  0.7033  0.8750 
+
+aboveQ3 = clay[(clay[,2]>0.7033),] #worst 39
+aboveQ3$performanceBin = 3
+belowQ1 = clay[(clay[,2]<0.5720),] #best 39
+belowQ1$performanceBin = 1
+inBox = clay[(clay[,2]<0.7033)&(clay[,9]>0.5720),] #middle 78
+inBox$performanceBin = 2
+
+hist(clay$compPercent)
+
+cornerbacks = clay[(clay[,23] == 1),]
+linebackers = clay[(clay[,24] == 1),]
+safeties = clay[(clay[,25] == 1),]
+
+summary(cornerbacks$compPercent)
+hist(cornerbacks$compPercent)
+
+summary(linebackers$compPercent)
+hist(linebackers$compPercent)
+
+summary(safeties$compPercent)
+hist(safeties$compPercent)
+
+```
+
+
+```{r}
+
+
+df_clay$nflId = NULL
+df_clay$position = NULL
+df_clay$height = NULL
+df_clay$birthDate = NULL
+df_clay$collegeName = NULL
+df_clay$displayName = NULL
+
+#Stepwise Regression
+#Scaling the data except the response variable and categorical
+
+scaledData = as.data.frame(scale(df_clay[,c(2,3,5,6,7,8,9,10,11)]))
+scaledData <- cbind(df_clay[,1],scaledData,df_clay[,4],df_clay[,12:19]) # Add columns back in
+
+# 
+# 
+library(caret)
+
+model = lm(scaledData$compPercent ~ ., data=scaledData)
+summary(model)
+library("olsrr")
+# stepwise documentation: https://www.rdocumentation.org/packages/olsrr/versions/0.5.3/topics/ols_step_both_p
+step_model = ols_step_both_p(model, pent=0.1, prem=0.1)
+# note: we can specify the p-value, under/over which vars are added/removed from model (pent/prem arguments in ols_step_both_p)
+step_model
+
+# Stepwise Regression
+# Create regression model predicting on only intercept
+fitstart = lm(compPercent ~ 1, data=scaledData)
+
+# Create regression model with all predictors
+fitall = lm(compPercent ~ ., data=scaledData)
+
+# Compute stepwise regression for crime data
+step(fitstart, direction="both", scope=formula(fitall))
+
+# Now using the code below to perform 5 fold CV
+data = df_clay
+
+ctrl <- trainControl(method = "repeatedcv", number = 5, repeats = 5)
+
+lmFit_Step <- train(compPercent ~ ., data = scaledData, "lmStepAIC", scope = 
+                 list(lower = compPercent~1, upper = compPercent~.), direction = "backward",trControl=ctrl)
+
+#Fitting a new model with these 10 variables
+
+mod_Step = lm(compPercent ~ weight + Pac12 + max_accel + heightInches + Linebackers + other_conf + ACC + avg_accel + avg_speed + BigTen, data = scaledData)
+summary(mod_Step)
+
+
+# Now let's use cross-validation to see how good this model really is. 
+
+SStot <- sum((data$compPercent - mean(data$compPercent))^2)
+totsse <- 0
+for(i in 1:nrow(scaledData)) {
+  mod_Step_i = lm(compPercent ~ weight + Pac12 + max_accel + heightInches + Linebackers + other_conf + ACC + avg_accel + avg_speed + BigTen, data = scaledData[-i,])
+  pred_i <- predict(mod_Step_i,newdata=scaledData[i,])
+  totsse <- totsse + ((pred_i - data[i,1])^2)
+}
+R2_mod <- 1 - totsse/SStot
+R2_mod
+
+
+# Take out weight, Pac12, and max_accel
+
+mod_Step = lm(compPercent ~ heightInches + Linebackers + other_conf + ACC + avg_accel + avg_speed + BigTen, data = scaledData)
+summary(mod_Step)
+
+# Take out the height and other_conf
+
+mod_Step = lm(compPercent ~ Linebackers + ACC + avg_accel + avg_speed + BigTen, data = scaledData)
+summary(mod_Step)
+
+
+# This model looks good, so now let's see how it cross-validates:
+
+SStot <- sum((data$compPercent - mean(data$compPercent))^2)
+totsse <- 0
+for(i in 1:nrow(df_clay)) {
+  mod_Step_i = lm(compPercent ~ Linebackers + ACC + avg_accel + avg_speed + BigTen, data = df_clay[-i,])
+  pred_i <- predict(mod_Step_i,newdata=df_clay[i,])
+  totsse <- totsse + ((pred_i - data[i,1])^2)
+}
+R2_mod <- 1 - totsse/SStot
+R2_mod
+
+```
+
+```{r}
+#If first line doesn't run, do it in the command line
+#COPY = read.csv('playerData.csv')
+
+num_COPY <- COPY[, c("compPercent", "weight", "heightInches", "numberOfPlaysAsClosestDefender", "ageYears", "avg_speed", "avg_accel"
+                     ,"max_speed", "max_accel", "ACC", "Big12", "BigTen", "Pac12", "SEC", "other_conf", "isPowerFive", "Cornerbacks", "Linebackers"
+                     ,"Safeties")]
+
+#LASSO REGRESSION
+range01 <- function(x){(x-min(x))/(max(x)-min(x))}
+COPY_sc <- num_COPY 
+COPY_sc[,-1] <- apply(num_COPY[-1], MARGIN = 2, FUN = range01)
+COPY_sc
+
+smp_size <- floor(0.7 * nrow(COPY_sc))
+split_tt <- sample(seq_len(nrow(COPY_sc)), size = smp_size)
+train_sc <- COPY_sc[split_tt, ]
+test_sc <- COPY_sc[-split_tt, ]
+
+x_tr <- as.matrix(train_sc[,2:19])
+y_tr <- as.matrix(train_sc[,1])
+
+x_ts <- as.matrix(test_sc[,2:19])
+y_ts <- as.matrix(test_sc[,1])
+
+cowboy <- glmnet(x_tr, y_tr, alpha = 1, family = "mgaussian")
+cv.cowboy <- cv.glmnet(x_tr, y_tr, alpha=1)
+plot(cv.cowboy)
+
+best.lambda <- cv.cowboy$lambda.min
+best.lambda
+coef(cv.cowboy, s = "lambda.min")
+cv.cowboy
+
+yhat <- predict(cv.cowboy, s=cv.cowboy$lambda.min, newx=x_ts)
+mse <- mean((y_ts - yhat)^2)
+yhat
+
+###linear model on unscaled data, using LASSO parameters
+lasso_lm <- lm(compPercent ~ weight + heightInches + avg_speed + avg_accel + BigTen + SEC + Cornerbacks + Linebackers, data = num_COPY)
+lasso_lm <- lm(compPercent ~avg_speed + avg_accel + BigTen + SEC + Linebackers, data = num_COPY)
+```
+
+
+```{r}
+#kNN model
+#bins = read.csv("playsDataWithBinsNum.csv", header = TRUE) #need to get rid of non-numeric columns
+bins <- as.data.frame(bins)
+
+library(kknn)
+
+binsTrimmed <- bins[, c("avg_speed", "avg_accel", "BigTen", "ACC", "Linebackers","performanceBin")]
+
+
+
+################
+set.seed(1)
+
+new_df <- bins[, c("avg_speed", "avg_accel", "BigTen", "ACC", "Linebackers","performanceBin123")]
+s <- sample(156,120)
+training <- new_df[s,]
+testing <- new_df[-s,]
+head(training)
+
+ 
+
+modelk <- train.kknn(performanceBin123 ~ ., data = training, kmax = 20, scale = TRUE)
+modelk
+
+ 
+
+prediction <- predict(modelk, testing[,-6])
+prediction
+prediction.round <- round(prediction)
+prediction.round
+
+ 
+
+CM <- table(testing[, 6], prediction.round)
+CM
+
+ 
+
+accuracy <- (sum(diag(CM)))/sum(CM)
+accuracy
+
+```
