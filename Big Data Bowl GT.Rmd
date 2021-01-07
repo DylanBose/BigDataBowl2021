@@ -550,15 +550,15 @@ playsFilter
 
 ```{r}
 #NOTE: IF THIS GIVES YOU AN ERROR, JUST RUN THE READ_CSV IN THE COMMAND LINE
-df_clay = read_csv("../nfl-big-data-bowl-2021/playerData.csv",
-                    col_types = cols())
+# df_clay = read_csv("../nfl-big-data-bowl-2021/playerData.csv",
+#                     col_types = cols())
 clay = df_clay
 
 #Get players in top 10% for "best" coverage
 bestCoverage = playsFilter %>% slice_min(playsFilter$compPercent, prop = 0.10)
 
 #kNN model
-bins = read.csv("playsDataWithBinsNum.csv", header = TRUE) #need to get rid of non-numeric columns
+# bins = read.csv("playsDataWithBinsNum.csv", header = TRUE) #need to get rid of non-numeric columns
 bins <- as.data.frame(bins)
 
  
@@ -611,8 +611,6 @@ plot(accurracy)
 title("K-Nearest-Neighbors")
 accurracy
 
-
-write.csv(clay_copy, "playsDataWithBins.csv")
 
 #Getting all of the quartiles for the completion percentage against
 summary(clay[,2])
@@ -668,20 +666,7 @@ library(caret)
 model = lm(scaledData$compPercent ~ ., data=scaledData)
 summary(model)
 library("olsrr")
-# stepwise documentation: https://www.rdocumentation.org/packages/olsrr/versions/0.5.3/topics/ols_step_both_p
-step_model = ols_step_both_p(model, pent=0.1, prem=0.1)
-# note: we can specify the p-value, under/over which vars are added/removed from model (pent/prem arguments in ols_step_both_p)
-step_model
 
-# Stepwise Regression
-# Create regression model predicting on only intercept
-fitstart = lm(compPercent ~ 1, data=scaledData)
-
-# Create regression model with all predictors
-fitall = lm(compPercent ~ ., data=scaledData)
-
-# Compute stepwise regression for crime data
-step(fitstart, direction="both", scope=formula(fitall))
 
 # Now using the code below to perform 5 fold CV
 data = df_clay
